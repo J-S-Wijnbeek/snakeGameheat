@@ -585,12 +585,27 @@ def select_region():
     result = [None]
 
     # ── Capture screen before the overlay window opens ────────────────────────
+    # We try two backends so the user can always see their game through the
+    # overlay, even on Linux/X11 where -alpha transparency may not work and
+    # PIL's ImageGrab.grab() requires scrot/gnome-screenshot to be installed.
     _bg_tk = None
     try:
         from PIL import ImageTk as _ImageTk, ImageEnhance as _ImageEnhance
-        _bg_shot = ImageGrab.grab()
-        _bg_shot = _ImageEnhance.Brightness(_bg_shot).enhance(OVERLAY_DIM_FACTOR)
-        _bg_tk = _ImageTk.PhotoImage(_bg_shot)
+        _bg_shot = None
+        # Primary: PIL ImageGrab (works on Windows/macOS; Linux needs scrot)
+        try:
+            _bg_shot = ImageGrab.grab()
+        except Exception:
+            pass
+        # Fallback: pyautogui.screenshot() uses a different backend on Linux
+        if _bg_shot is None:
+            try:
+                _bg_shot = pyautogui.screenshot()
+            except Exception:
+                pass
+        if _bg_shot is not None:
+            _bg_shot = _ImageEnhance.Brightness(_bg_shot).enhance(OVERLAY_DIM_FACTOR)
+            _bg_tk = _ImageTk.PhotoImage(_bg_shot)
     except Exception:
         pass   # fall back to plain semi-transparent window
 
@@ -941,8 +956,16 @@ class SetupGUI:
 
         def do_select():
             root.withdraw()
-            time.sleep(0.25)
-            self.region = select_region()
+            # Give the window manager time to hide the setup window before
+            # we take the background screenshot – 0.4 s is enough on slow
+            # compositors while still feeling instant to the user.
+            time.sleep(0.4)
+            try:
+                self.region = select_region()
+            except Exception as exc:
+                root.deiconify()
+                status_var.set(f"Region selection error: {exc}")
+                return
             root.deiconify()
             if self.region:
                 l, t, w, h = self.region
