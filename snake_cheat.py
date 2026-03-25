@@ -62,6 +62,24 @@ CELL_BODY  = 1   # snake body (blocked)
 CELL_WALL  = 2   # wall (blocked)
 DIRECTIONS = ["UP", "DOWN", "LEFT", "RIGHT"]
 
+# ── Tuning constants ──────────────────────────────────────────────────────────
+# Factor applied to the screenshot brightness in the region-selection overlay.
+# A value of 0.45 gives a noticeable dim while still showing the screen clearly.
+OVERLAY_DIM_FACTOR = 0.45
+
+# Euclidean colour distance used to decide whether two adjacent pixels belong
+# to the same "block" during cell-size auto-detection.
+CELL_DETECTION_COLOR_THRESHOLD = 25
+
+# After this many consecutive frames without detecting the snake head the
+# cheat loop re-clicks the game area to restore keyboard focus to the browser.
+REFOCUS_FRAME_INTERVAL = 20
+
+# Space-safety thresholds used by the BFS safety check:
+#   - The reachable area must be >= max(MIN_SAFE_CELLS, grid / SAFE_SPACE_FRACTION)
+MIN_SAFE_CELLS    = 4
+SAFE_SPACE_FRACTION = 6
+
 DIR_VECTOR = {
     "UP":    ( 0, -1),
     "DOWN":  ( 0,  1),
@@ -79,12 +97,18 @@ PYAUTOGUI_KEY = {
     "LEFT": "left", "RIGHT": "right",
 }
 
+WASD_KEY = {
+    "UP": "w", "DOWN": "s",
+    "LEFT": "a", "RIGHT": "d",
+}
+
 # ── Default configuration ─────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
     # pixels per grid cell (auto-detected or set manually)
     "cell_size": 20,
     # seconds the cheat waits between sending key presses
-    "move_interval": 0.12,
+    # 0.15 s matches the ~150 ms tick rate common in browser snake games
+    "move_interval": 0.15,
     # colour-matching tolerance (Euclidean RGB distance)
     "color_tolerance": 40,
     # RGB colours – overridden by the colour-picker wizard
@@ -93,6 +117,8 @@ DEFAULT_CONFIG = {
     "food_color":       [220, 50, 50],
     "background_color": [0, 0, 0],
     "wall_color":       [80, 80, 80],
+    # when True, WASD keys are used in addition to arrow keys
+    "use_wasd": False,
 }
 
 
@@ -107,6 +133,60 @@ def _color_dist(c1, c2):
 
 def _color_match(pixel, reference, tolerance):
     return _color_dist(pixel[:3], reference[:3]) <= tolerance
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cell-size auto-detection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _detect_cell_size(img, min_size=8, max_size=60):
+    """
+    Estimate the grid-cell size (in pixels) from a screenshot of the game area.
+
+    Strategy: scan several horizontal and vertical lines, record the length of
+    every contiguous run of visually similar pixels, then pick the size that
+    appears most frequently (within the plausible range).  Works reliably on
+    games whose background grid is painted in uniform blocks.
+
+    Returns an integer cell-size estimate, or None if the image is too
+    ambiguous to decide.
+    """
+    from collections import Counter
+    w, h = img.size
+    counts = Counter()
+
+    def _scan_line(pixels):
+        run = 1
+        prev = pixels[0][:3]
+        for px in pixels[1:]:
+            cur = px[:3]
+            if _color_dist(cur, prev) < CELL_DETECTION_COLOR_THRESHOLD:
+                run += 1
+            else:
+                if min_size <= run <= max_size:
+                    counts[run] += 1
+                run = 1
+                prev = cur
+        if min_size <= run <= max_size:
+            counts[run] += 1
+
+    # Sample a handful of rows and columns spread across the image
+    sample_ys = [h * i // 8 for i in range(1, 8)]
+    sample_xs = [w * i // 8 for i in range(1, 8)]
+
+    for y in sample_ys:
+        y = max(0, min(h - 1, y))
+        row_pixels = [img.getpixel((x, y)) for x in range(w)]
+        _scan_line(row_pixels)
+
+    for x in sample_xs:
+        x = max(0, min(w - 1, x))
+        col_pixels = [img.getpixel((x, y)) for y in range(h)]
+        _scan_line(col_pixels)
+
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -191,10 +271,23 @@ class PathFinder:
         """
         Returns a list of direction strings (e.g. ["RIGHT", "DOWN", "RIGHT"])
         or None when no safe route exists.
+
+        Before returning a path the method runs a space-safety check: if
+        following the first step of the path would leave fewer open cells than
+        a minimum threshold, the path is discarded and None is returned so the
+        caller falls back to flood-fill survival mode.  This prevents the snake
+        from eating food and immediately getting trapped on a crowded board.
         """
         if state.head is None or state.food is None:
             return None
 
+        path = self._bfs(state)
+        if path and not self._is_safe(state, path):
+            return None
+        return path
+
+    def _bfs(self, state):
+        """Raw BFS from head to food; returns path or None."""
         start = state.head
         goal  = state.food
         grid  = state.grid
@@ -228,6 +321,27 @@ class PathFinder:
                 queue.append(((nc, nr), new_path))
 
         return None     # no path
+
+    def _is_safe(self, state, path):
+        """
+        Return True if following the first step of *path* still leaves enough
+        open space for the snake to manoeuvre.
+
+        Threshold: the reachable area from the next cell must be at least
+        1/6 of the total grid, or at least 4 cells (whichever is larger).
+        This guards against the snake eating food and immediately boxing itself
+        in on a crowded board.
+        """
+        if not path:
+            return True
+        col, row = state.head
+        dc, dr = DIR_VECTOR[path[0]]
+        nc, nr = col + dc, row + dr
+        if not (0 <= nc < state.cols and 0 <= nr < state.rows):
+            return False
+        space = self.flood_fill_size(state.grid, nc, nr, state.rows, state.cols)
+        min_space = max(MIN_SAFE_CELLS, (state.rows * state.cols) // SAFE_SPACE_FRACTION)
+        return space >= min_space
 
     def flood_fill_size(self, grid, start_col, start_row, rows, cols):
         """Count cells reachable from (start_col, start_row)."""
@@ -457,19 +571,41 @@ class OverlayWindow:
 
 def select_region():
     """
-    Show a semi-transparent full-screen overlay where the user can
-    click-and-drag to select the game region.
+    Show a full-screen overlay where the user can click-and-drag to select
+    the game region.
+
+    On systems without a compositor (e.g. Linux/X11 without compositing) the
+    OS-level ``-alpha`` attribute has no effect and the window would appear as
+    a solid gray rectangle, blocking the view.  To avoid this we take a
+    screenshot *before* opening the window and render it as a dimmed canvas
+    background.  The user therefore always sees their screen contents.
 
     Returns (left, top, width, height) or None if cancelled.
     """
     result = [None]
 
+    # ── Capture screen before the overlay window opens ────────────────────────
+    _bg_tk = None
+    try:
+        from PIL import ImageTk as _ImageTk, ImageEnhance as _ImageEnhance
+        _bg_shot = ImageGrab.grab()
+        _bg_shot = _ImageEnhance.Brightness(_bg_shot).enhance(OVERLAY_DIM_FACTOR)
+        _bg_tk = _ImageTk.PhotoImage(_bg_shot)
+    except Exception:
+        pass   # fall back to plain semi-transparent window
+
     root = tk.Tk()
     root.attributes("-fullscreen", True)
-    root.attributes("-alpha", 0.35)
     root.attributes("-topmost", True)
     root.overrideredirect(True)
     root.config(bg="gray15")
+
+    # Apply OS alpha only when no screenshot background is available
+    # (screenshot already provides the dimming effect without alpha support)
+    try:
+        root.attributes("-alpha", 0.85 if _bg_tk else 0.35)
+    except Exception:
+        pass
 
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
@@ -477,6 +613,10 @@ def select_region():
     canvas = tk.Canvas(root, bg="gray15", highlightthickness=0,
                        width=sw, height=sh)
     canvas.pack(fill="both", expand=True)
+
+    # ── Paint the dimmed screenshot so the user can see the screen ────────────
+    if _bg_tk is not None:
+        canvas.create_image(0, 0, anchor="nw", image=_bg_tk)
 
     canvas.create_text(
         sw // 2, 50,
@@ -656,7 +796,9 @@ class SnakeCheat:
         pyautogui.click(l + w // 2, t + h // 2)
         time.sleep(0.25)
 
-        interval = self.config["move_interval"]
+        interval  = self.config["move_interval"]
+        use_wasd  = self.config.get("use_wasd", False)
+        _no_head_streak = 0   # consecutive frames without finding the snake head
 
         while self.running:
             try:
@@ -664,9 +806,17 @@ class SnakeCheat:
                 state = self._analyser.analyse(img)
 
                 if state.head is None:
+                    _no_head_streak += 1
+                    # Re-click the game area after several missed frames so the
+                    # browser window regains keyboard focus (e.g. after the
+                    # overlay appeared on top of it).
+                    if _no_head_streak % REFOCUS_FRAME_INTERVAL == 0:
+                        pyautogui.click(l + w // 2, t + h // 2)
                     self._overlay.update(None, None, [], "Searching for snake…")
                     time.sleep(0.1)
                     continue
+
+                _no_head_streak = 0
 
                 if state.food is None:
                     self._overlay.update(state.head, None, [], "No food detected…")
@@ -689,6 +839,8 @@ class SnakeCheat:
 
                 if next_dir and next_dir != OPPOSITE.get(self._current_dir):
                     pyautogui.press(PYAUTOGUI_KEY[next_dir])
+                    if use_wasd:
+                        pyautogui.press(WASD_KEY[next_dir])
                     self._current_dir = next_dir
 
                 time.sleep(interval)
@@ -712,7 +864,7 @@ class SetupGUI:
     def run(self):
         root = tk.Tk()
         root.title("Snake Cheat – Setup")
-        root.geometry("520x520")
+        root.geometry("520x620")
         root.resizable(False, False)
         root.configure(bg="#1a1a2e")
 
@@ -735,23 +887,37 @@ class SetupGUI:
         tk.Frame(root, bg="#333333", height=1).pack(fill="x", padx=24, pady=6)
 
         # ── Tuning sliders ────────────────────────────────────────────────────
+        cell_var     = tk.IntVar(value=DEFAULT_CONFIG["cell_size"])
+        interval_var = tk.DoubleVar(value=DEFAULT_CONFIG["move_interval"])
+        tol_var      = tk.IntVar(value=DEFAULT_CONFIG["color_tolerance"])
+        wasd_var     = tk.BooleanVar(value=DEFAULT_CONFIG["use_wasd"])
+
         def _row(label, var, lo, hi, inc=1):
             f = tk.Frame(root, bg="#1a1a2e")
             f.pack(pady=3)
             tk.Label(f, text=f"{label}:", bg="#1a1a2e", fg="#cccccc",
                      width=24, anchor="e").pack(side="left")
-            tk.Spinbox(f, from_=lo, to=hi, increment=inc,
-                       textvariable=var, width=8,
-                       bg="#0d3b66", fg="white", buttonbackground="#0d3b66",
-                       ).pack(side="left", padx=8)
+            sb = tk.Spinbox(f, from_=lo, to=hi, increment=inc,
+                            textvariable=var, width=8,
+                            bg="#0d3b66", fg="white", buttonbackground="#0d3b66",
+                            )
+            sb.pack(side="left", padx=8)
+            return sb
 
-        cell_var  = tk.IntVar(value=20)
-        interval_var = tk.DoubleVar(value=0.12)
-        tol_var   = tk.IntVar(value=40)
+        cell_spin = _row("Grid cell size (px)",      cell_var,     5,   80)
+        _row("Move interval (sec)",                  interval_var, 0.05, 2.0, 0.01)
+        _row("Colour tolerance (0–255)",             tol_var,      5,  200)
 
-        _row("Grid cell size (px)",       cell_var,  5,   80)
-        _row("Move interval (sec)",        interval_var, 0.05, 2.0, 0.01)
-        _row("Colour tolerance (0–255)",   tol_var,   5,  200)
+        # WASD checkbox
+        f_wasd = tk.Frame(root, bg="#1a1a2e")
+        f_wasd.pack(pady=3)
+        tk.Label(f_wasd, text="Use WASD keys:", bg="#1a1a2e", fg="#cccccc",
+                 width=24, anchor="e").pack(side="left")
+        tk.Checkbutton(
+            f_wasd, variable=wasd_var,
+            bg="#1a1a2e", fg="#cccccc",
+            activebackground="#1a1a2e", selectcolor="#0d3b66",
+        ).pack(side="left", padx=8)
 
         tk.Frame(root, bg="#333333", height=1).pack(fill="x", padx=24, pady=10)
 
@@ -781,9 +947,30 @@ class SetupGUI:
             if self.region:
                 l, t, w, h = self.region
                 region_var.set(f"Region: {w}×{h} at ({l}, {t})")
-                status_var.set("Step 2: click 'Configure Colours'")
+                status_var.set("Step 1b (optional): click 'Auto-Detect Cell Size'")
             else:
                 status_var.set("Cancelled – try again")
+
+        def do_autodetect():
+            if not self.region:
+                messagebox.showwarning("No region", "Please select a region first.")
+                return
+            try:
+                from PIL import ImageGrab as _IG
+                l, t, w, h = self.region
+                img = _IG.grab(bbox=(l, t, l + w, t + h))
+                detected = _detect_cell_size(img)
+                if detected:
+                    cell_var.set(detected)
+                    status_var.set(
+                        f"Detected cell size: {detected} px  – verify and continue"
+                    )
+                else:
+                    status_var.set(
+                        "Could not auto-detect cell size – set it manually"
+                    )
+            except Exception as exc:
+                status_var.set(f"Auto-detect failed: {exc}")
 
         def do_colors():
             if not self.region:
@@ -798,18 +985,21 @@ class SetupGUI:
             if not self.region:
                 messagebox.showwarning("No region", "Please select a region first.")
                 return
-            self.config["cell_size"]      = cell_var.get()
-            self.config["move_interval"]  = interval_var.get()
+            self.config["cell_size"]       = cell_var.get()
+            self.config["move_interval"]   = interval_var.get()
             self.config["color_tolerance"] = tol_var.get()
+            self.config["use_wasd"]        = wasd_var.get()
             root.destroy()
 
-        tk.Button(root, text="1.  Select Game Area",    command=do_select,
+        tk.Button(root, text="1.  Select Game Area",       command=do_select,
                   **btn).pack(pady=4, padx=40, fill="x")
-        tk.Button(root, text="2.  Configure Colours",   command=do_colors,
+        tk.Button(root, text="1b. Auto-Detect Cell Size",  command=do_autodetect,
+                  **{**btn, "bg": "#1a3a5c"}).pack(pady=4, padx=40, fill="x")
+        tk.Button(root, text="2.  Configure Colours",      command=do_colors,
                   **btn).pack(pady=4, padx=40, fill="x")
-        tk.Button(root, text="3.  Start Cheat  ▶",      command=do_start,
+        tk.Button(root, text="3.  Start Cheat  ▶",         command=do_start,
                   **{**btn, "bg": "#145a32"}).pack(pady=4, padx=40, fill="x")
-        tk.Button(root, text="Quit",                    command=sys.exit,
+        tk.Button(root, text="Quit",                       command=sys.exit,
                   **{**btn, "bg": "#6e1a1a"}).pack(pady=4, padx=40, fill="x")
 
         root.mainloop()
