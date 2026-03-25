@@ -36,14 +36,21 @@ from collections import deque
 
 try:
     import pyautogui
-except Exception:
-    sys.exit("Missing or broken dependency: pip install pyautogui\n"
-             "On Linux you also need a running display (DISPLAY must be set).")
+except ImportError:
+    sys.exit("Missing dependency: pip install pyautogui")
+except KeyError as _e:
+    sys.exit(
+        f"pyautogui failed to load (missing environment variable: {_e}).\n"
+        "On Linux, make sure a display is available (DISPLAY must be set).\n"
+        "If you are on a headless server, try running via: DISPLAY=:0 python snake_cheat.py"
+    )
 
 try:
     from PIL import ImageGrab, Image
-except Exception:
+except ImportError:
     sys.exit("Missing dependency: pip install Pillow")
+except OSError as _e:
+    sys.exit(f"Pillow failed to load ({_e}).\nTry reinstalling: pip install --force-reinstall Pillow")
 
 # ── pyautogui safety settings ────────────────────────────────────────────────
 pyautogui.PAUSE = 0.01       # minimal delay – enough to avoid overwhelming the OS
