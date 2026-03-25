@@ -1,0 +1,11 @@
+# Snake Cheat Overlay – Python dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Python >= 3.8 required.  tkinter ships with the standard library but may
+# need a separate system package on some Linux distributions, e.g.:
+#   sudo apt install python3-tk
+
+pyautogui>=0.9.53
+Pillow>=9.0.0
