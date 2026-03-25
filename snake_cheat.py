@@ -26,18 +26,23 @@ import sys
 import time
 import threading
 import platform
-import tkinter as tk
-from tkinter import messagebox
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except ImportError:
+    sys.exit("Missing dependency: tkinter is not installed.\n"
+             "On Debian/Ubuntu: sudo apt install python3-tk")
 from collections import deque
 
 try:
     import pyautogui
-except ImportError:
-    sys.exit("Missing dependency: pip install pyautogui")
+except Exception:
+    sys.exit("Missing or broken dependency: pip install pyautogui\n"
+             "On Linux you also need a running display (DISPLAY must be set).")
 
 try:
     from PIL import ImageGrab, Image
-except ImportError:
+except Exception:
     sys.exit("Missing dependency: pip install Pillow")
 
 # ── pyautogui safety settings ────────────────────────────────────────────────
