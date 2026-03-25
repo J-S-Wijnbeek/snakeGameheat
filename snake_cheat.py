@@ -223,7 +223,18 @@ class ScreenAnalyser:
 
     def capture(self):
         l, t, w, h = self.region
-        return ImageGrab.grab(bbox=(l, t, l + w, t + h))
+        try:
+            return ImageGrab.grab(bbox=(l, t, l + w, t + h))
+        except OSError:
+            # ImageGrab.grab() raises OSError on Linux when 'scrot' is not
+            # installed.  Try pyautogui as a second attempt (it uses the same
+            # backend, so both ultimately need: sudo apt install scrot).
+            print(
+                "Warning: PIL ImageGrab failed – falling back to pyautogui.\n"
+                "If screenshots are broken, install scrot: sudo apt install scrot",
+                file=sys.stderr,
+            )
+            return pyautogui.screenshot(region=(l, t, w, h))
 
     def analyse(self, img):
         cfg = self.config
@@ -701,7 +712,19 @@ def pick_colors(region, config):
         return config
 
     l, t, w, h = region
-    screenshot = ImageGrab.grab(bbox=(l, t, l + w, t + h))
+    try:
+        screenshot = ImageGrab.grab(bbox=(l, t, l + w, t + h))
+    except OSError:
+        try:
+            screenshot = pyautogui.screenshot(region=(l, t, w, h))
+        except OSError as exc:
+            messagebox.showerror(
+                "Screenshot failed",
+                f"Could not capture the game region:\n{exc}\n\n"
+                "On Linux, install scrot and retry:\n"
+                "  sudo apt install scrot",
+            )
+            return config
 
     new_config = config.copy()
 

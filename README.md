@@ -27,6 +27,10 @@ thinking.
 
 - Python 3.8 or newer
 - `tkinter` (ships with Python; on Linux you may need `sudo apt install python3-tk`)
+- **Linux only:** `scrot` – required by Pillow's `ImageGrab` for taking screenshots:
+  ```bash
+  sudo apt install scrot
+  ```
 
 Install Python dependencies:
 
